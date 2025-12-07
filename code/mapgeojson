@@ -1,0 +1,47 @@
+// -----------------------------
+// 1. Load uploaded Paddy Fields asset
+// Replace with your uploaded asset path
+var paddy = ee.FeatureCollection("projects/ricevision/assets/paddy_detected");
+
+// Inspect attributes
+print("Paddy polygons", paddy);
+
+// -----------------------------
+// 2. Center map on the dataset
+Map.centerObject(paddy, 14);
+
+// -----------------------------
+// 3. Overlay Sentinel-2 imagery
+var s2 = ee
+  .ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+  .filterBounds(paddy)
+  .filterDate("2024-01-01", "2024-12-31")
+  .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20))
+  .median()
+  .clip(paddy);
+
+// RGB visualization
+var rgb = s2.select(["B4", "B3", "B2"]).visualize({ min: 0, max: 3000 });
+Map.addLayer(rgb, {}, "Sentinel-2 RGB");
+
+// -----------------------------
+// 4. Style Paddy polygons by mean confidence
+// Assumes 'mean_conf' attribute exists in your asset
+var paddyStyled = paddy.map(function (f) {
+  var conf = ee.Number(f.get("mean_conf"));
+  // Map confidence 0-100 to 0-255 alpha
+  var alpha = conf.divide(100).multiply(255).int();
+  var color = ee.String("00FF00").cat(alpha.format("%02X")); // green with transparency
+  return f.set("style", { color: color, fillColor: color });
+});
+
+// Add styled layer to the map
+Map.addLayer(
+  paddyStyled.style({ styleProperty: "style" }),
+  {},
+  "Paddy by Confidence"
+);
+
+// -----------------------------
+// 5. Optional: Add legend or additional layers
+// For example, you can overlay roads, water, or other datasets

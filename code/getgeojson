@@ -1,0 +1,14 @@
+// 1. Define your ROI (example: a polygon)
+
+// 2. Convert the ROI geometry to a Feature
+var roiFeature = ee.Feature(roi);
+
+// 3. Wrap the Feature into a FeatureCollection
+var roiFC = ee.FeatureCollection([roiFeature]);
+
+// 4. Export the FeatureCollection as GeoJSON to Google Drive
+Export.table.toDrive({
+  collection: roiFC,
+  description: "ROI_GeoJSON_Export",
+  fileFormat: "GeoJSON",
+});
