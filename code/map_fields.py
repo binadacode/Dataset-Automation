@@ -17,7 +17,7 @@ print("✅ Earth Engine authenticated!")
 # -----------------------------
 # 2. Load ROI
 # -----------------------------
-geojson_path = r"D:\iit\2nd yr\sgdp\code\my_roi.geojson"
+geojson_path = "my_roi.geojson"
 with open(geojson_path) as f:
     geojson_data = json.load(f)
 
@@ -48,10 +48,9 @@ wc = ee.ImageCollection("ESA/WorldCereal/2021/MODELS/v100") \
         .mosaic() \
         .clip(roi_geom)
 
-class_img = wc.select("classification")   # 0 or 100
-conf_img  = wc.select("confidence")       # 0–100
-
-mask = class_img.eq(100).selfMask()       # Only paddy/seasonal crops
+class_img = wc.select("classification")
+conf_img = wc.select("confidence")
+mask = class_img.eq(100).selfMask()
 
 # -----------------------------
 # 5. Compute Crop Area
@@ -81,9 +80,9 @@ vectors = mask.reduceToVectors(
 )
 
 # -----------------------------
-# 7. Enrich polygons with area & confidence
+# 7. Enrich polygons
 # -----------------------------
-print("📦 Enriching polygons with area and mean confidence...")
+print("📦 Enriching polygons...")
 def enrich_feature(f):
     area_ha = f.geometry().area(maxError=1).divide(10000)
     conf_mean = conf_img.reduceRegion(
@@ -94,32 +93,32 @@ def enrich_feature(f):
     ).get("confidence")
     return f.set({"area_ha": area_ha, "mean_conf": conf_mean})
 
-vectors_fc = vectors.map(enrich_feature)
-vectors_fc = vectors_fc.filter(ee.Filter.gt('area_ha', 0.01))  # filter tiny polygons
+vectors_fc = vectors.map(enrich_feature).filter(ee.Filter.gt('area_ha', 0.01))
 
 # -----------------------------
-# 8. Export GeoJSON to local
+# 8. Save GeoJSON locally
 # -----------------------------
-print("💾 Exporting polygons as GeoJSON locally...")
-geojson_path = os.path.join(export_dir, "paddy_detected.geojson")
-geojson_data = vectors_fc.getInfo()  # small/medium ROI only
-with open(geojson_path, "w") as f:
-    json.dump(geojson_data, f)
-print(f"🟩 GeoJSON saved → {geojson_path}")
+print("💾 Exporting polygons as GeoJSON...")
+local_geojson_path = os.path.join(export_dir, "paddy_detected.geojson")
+geojson_export = vectors_fc.getInfo()
+with open(local_geojson_path, "w") as f:
+    json.dump(geojson_export, f)
+print(f"🟩 GeoJSON saved → {local_geojson_path}")
 
 # -----------------------------
-# 9. Convert GeoJSON to Shapefile for GEE
+# 9. Convert to Shapefile
 # -----------------------------
-print("💾 Converting GeoJSON to Shapefile...")
-gdf = gpd.read_file(geojson_path)
+print("💾 Converting to Shapefile...")
+gdf = gpd.read_file(local_geojson_path)
 shp_path = os.path.join(shp_dir, "paddy_detected.shp")
 gdf.to_file(shp_path, driver='ESRI Shapefile')
 print(f"✅ Shapefile saved → {shp_path}")
 
 # -----------------------------
-# 10. Download Sentinel-2 satellite image
+# 10. HIGH QUALITY SENTINEL-2 EXPORT TO DRIVE
 # -----------------------------
-print("🛰️ Fetching Sentinel-2 satellite view...")
+print("🛰️ Starting high-quality Sentinel-2 export to Google Drive...")
+
 s2 = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
         .filterBounds(roi_geom)
         .filterDate("2024-01-01", "2024-12-31")
@@ -127,39 +126,63 @@ s2 = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
         .median()
         .clip(roi_geom))
 
-rgb = s2.select(["B4","B3","B2"]).visualize(min=0, max=3000)
-sat_url = rgb.getDownloadURL({"scale":10,"region":roi_geom,"format":"png"})
-sat_path = os.path.join(export_dir, "satellite.png")
-with open(sat_path, "wb") as f:
-    f.write(requests.get(sat_url).content)
-print(f"🛰️ Satellite image saved → {sat_path}")
+rgb = s2.select(["B4", "B3", "B2"]).visualize(min=0, max=3000)
+
+task = ee.batch.Export.image.toDrive(
+    image=rgb,
+    description="Sentinel2_HighRes",
+    folder="RicePipeline",
+    fileNamePrefix="sentinel2_10m",
+    region=roi_geom,
+    scale=10,
+    maxPixels=1e13,
+    fileFormat="GeoTIFF"
+)
+task.start()
+print("🚀 High-quality export started!")
+print("📁 Check Google Drive → RicePipeline folder.")
+print("⚠ Export takes 3–15 minutes depending on ROI size.")
 
 # -----------------------------
-# 11. Download Paddy mask PNG
+# 11. LOW-RES PNG FOR FOLIUM MAP
 # -----------------------------
-print("⬇️ Downloading WorldCereal paddy mask...")
-mask_rgb = mask.visualize(min=0, max=1, palette=["000000","00FF00"])
-mask_url = mask_rgb.getDownloadURL({"scale":10,"region":roi_geom,"format":"png"})
+print("🛰️ Generating low-res PNG for Folium...")
+png_url = rgb.getThumbURL({
+    "region": roi_geom,
+    "scale": 30,       # low-res to avoid 50MB limit
+    "format": "png"
+})
+
+sat_path = os.path.join(export_dir, "satellite_lowres.png")
+with open(sat_path, "wb") as f:
+    f.write(requests.get(png_url).content)
+
+print(f"🖼 Low-resolution satellite PNG saved → {sat_path}")
+
+# -----------------------------
+# 12. Mask PNG for Folium
+# -----------------------------
+print("⬇️ Generating mask PNG...")
+mask_rgb = mask.visualize(min=0, max=1, palette=["000000", "00FF00"])
+mask_url = mask_rgb.getThumbURL({"region": roi_geom, "scale": 30, "format": "png"})
 mask_path = os.path.join(export_dir, "wc_mask.png")
 with open(mask_path, "wb") as f:
     f.write(requests.get(mask_url).content)
-print(f"🟩 Paddy mask saved → {mask_path}")
+print(f"🟩 Mask image saved → {mask_path}")
 
 # -----------------------------
-# 12. Create Folium map
+# 13. Folium Map
 # -----------------------------
-print("🌍 Creating combined satellite + mask map...")
+print("🌍 Creating Folium map...")
 m = folium.Map(location=[center[1], center[0]], zoom_start=14)
 
-# Satellite base
 folium.raster_layers.ImageOverlay(
-    name="Satellite View",
+    name="Satellite View (Low-Res)",
     image=sat_path,
     bounds=[[min_lat, min_lon], [max_lat, max_lon]],
     opacity=1.0
 ).add_to(m)
 
-# Paddy mask overlay
 folium.raster_layers.ImageOverlay(
     name="Paddy Mask",
     image=mask_path,
@@ -173,4 +196,4 @@ m.save(map_path)
 webbrowser.open(map_path)
 print(f"🌐 Map saved → {map_path}")
 
-print("🎉 DONE! GeoJSON, Shapefile, satellite image, mask, and Folium map generated.")
+print("🎉 DONE! High-quality export running + low-res map preview ready.")
