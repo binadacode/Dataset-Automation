@@ -45,24 +45,51 @@ os.makedirs(shp_dir, exist_ok=True)
 print(f"📁 Export folders ready: {export_dir}")
 
 # -----------------------------
-# 4. Export DS divisions locally as GeoJSON
+# 4a. Export full DS divisions as GeoJSON
 # -----------------------------
-print("💾 Exporting DS divisions GeoJSON...")
+print("💾 Exporting full DS divisions GeoJSON...")
 
-local_geojson_path = os.path.join(export_dir, "sri_lanka_ds.geojson")
+full_geojson_path = os.path.join(export_dir, "sri_lanka_ds.geojson")
+full_geojson = ds_fc.getInfo()
 
-geojson_export = ds_fc.getInfo()
-with open(local_geojson_path, "w") as f:
-    json.dump(geojson_export, f)
+# Wrap full export as FeatureCollection
+full_fc = {
+    "type": "FeatureCollection",
+    "features": full_geojson['features']
+}
 
-print(f"🟩 DS GeoJSON saved → {local_geojson_path}")
+with open(full_geojson_path, "w") as f:
+    json.dump(full_fc, f)
+
+print(f"🟩 Full DS GeoJSON saved → {full_geojson_path}")
 
 # -----------------------------
-# 5. Convert GeoJSON → Shapefile
+# 4b. Export each DS division individually as valid GeoJSON
 # -----------------------------
-print("💾 Converting to Shapefile...")
+print("💾 Exporting individual DS GeoJSONs as FeatureCollections...")
 
-gdf = gpd.read_file(local_geojson_path)
+for feature in full_geojson['features']:
+    props = feature['properties']
+    ds_name = props['ADM2_NAME'].replace(" ", "_")  # safe filename
+
+    # Wrap single feature in a FeatureCollection
+    feature_fc = {
+        "type": "FeatureCollection",
+        "features": [feature]
+    }
+
+    geojson_path = os.path.join(export_dir, f"{ds_name}.geojson")
+    with open(geojson_path, "w") as f:
+        json.dump(feature_fc, f)
+
+    print(f"🟢 Saved EE-compatible GeoJSON: {geojson_path}")
+
+# -----------------------------
+# 5. Convert full GeoJSON → Shapefile
+# -----------------------------
+print("💾 Converting full DS GeoJSON to Shapefile...")
+
+gdf = gpd.read_file(full_geojson_path)
 shp_path = os.path.join(shp_dir, "sri_lanka_ds.shp")
 gdf.to_file(shp_path, driver='ESRI Shapefile')
 
@@ -112,5 +139,4 @@ m.save(html_path)
 webbrowser.open(html_path)
 
 print(f"🌐 Folium map saved → {html_path}")
-
 print("🎉 DONE! Sri Lanka DS Divisions mapped successfully.")

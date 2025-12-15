@@ -1,0 +1,10 @@
+{
+  "name": "projects/earthengine-legacy/assets/users/binada2005/admin_boundaries/ds_level",
+  "sources": [
+    {
+      "uris": [
+        "file:///C:/Temp/DS_Divisions/shapefile/sri_lanka_ds.shp"
+      ]
+    }
+  ]
+}
