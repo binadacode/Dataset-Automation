@@ -1,0 +1,21 @@
+// ===============================
+// SIMPLIFY PADDY GEOMETRY (ONCE)
+// ===============================
+
+var paddy = ee.FeatureCollection('projects/ricevision/assets/Ampara_paddy2');
+
+var simplified = paddy.map(function(f){
+  return f.simplify({
+    maxError: 30   // meters (SAFE for Sentinel scale)
+  });
+});
+
+print('Original count:', paddy.size());
+print('Simplified count:', simplified.size());
+
+// Export simplified polygons
+Export.table.toAsset({
+  collection: simplified,
+  description: 'Ampara_paddy_simplified',
+  assetId: 'projects/ricevision/assets/Ampara_paddy_simplified'
+});
