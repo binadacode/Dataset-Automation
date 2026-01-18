@@ -1,97 +1,179 @@
 import ee
-import json
-import os
+import time
 
-# -------------------------
-# 0. Setup authentication & initialize Earth Engine
-# -------------------------
-# Optional: path to your OAuth JSON (if using local credentials)
-oauth_path = r"D:\iit\2nd yr\sgdp\code\ricevision_oauth.json"
-if os.path.exists(oauth_path):
-    os.environ['EARTHENGINE_TOKEN_FILE'] = oauth_path
+# =====================================================
+# AUTH & INIT
+# =====================================================
+ee.Authenticate()
+ee.Initialize(project='ricevision')
 
-# Authenticate (opens browser once, saves token)
-ee.Authenticate()  
+# =====================================================
+# CONFIG
+# =====================================================
+YEARS = [2025]
 
-# Initialize with your registered project
-ee.Initialize(project="ricevision")
-print("✅ Earth Engine authenticated & initialized!")
+DISTRICT_NAME = 'Ampara'
+ROI_ASSET = 'projects/ricevision/assets/Ampara_paddy2'
 
-# -------------------------
-# 1. Load AOI from local GeoJSON
-# -------------------------
-with open("dambulla.geojson") as f:  # replace with your file name
-    gj = json.load(f)
+N_POINTS = 4000          # fixed points → same lat/lon for all images
+SEED = 42
 
-aoi = ee.FeatureCollection(gj)
+IMAGES_PER_MONTH = 4     # 👈 key scalability control
+MAX_WAIT_MINUTES = 30
+POLL_INTERVAL = 30
+WIFI_RETRY_WAIT = 60
 
-# -------------------------
-# 2. Load Sentinel-2 SR Harmonized with 50% cloud filter
-# -------------------------
-s2 = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-        .filterBounds(aoi)
-        .filterDate("2021-01-01", "2025-12-31")
-        .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 50))
-        .select(["B1","B2","B3","B4","B5","B6","B7","B8","B8A","B9","B11","B12","SCL"]))
+# =====================================================
+# LOAD ROI
+# =====================================================
+roi = ee.FeatureCollection(ROI_ASSET)
+print('Total paddy polygons:', roi.size().getInfo())
 
-# -------------------------
-# 3. Mask cloudy/shadow pixels using SCL
-# -------------------------
-def mask_scl(img):
-    scl = img.select("SCL")
-    mask = scl.neq(3).And(scl.neq(8)).And(scl.neq(9)).And(scl.neq(10)).And(scl.neq(11))
-    return img.updateMask(mask)
-
-s2 = s2.map(mask_scl)
-
-# -------------------------
-# 4. Create random sample points within AOI
-# -------------------------
-points = ee.FeatureCollection.randomPoints(region=aoi, points=1000, seed=42)
-
-# Add latitude & longitude properties
-def add_lat_lon(f):
-    coords = f.geometry().coordinates()
-    return f.set({
-        "longitude": coords.get(0),
-        "latitude": coords.get(1)
-    })
-
-points = points.map(add_lat_lon)
-
-# -------------------------
-# 5. Sample Sentinel-2 images at those points
-# -------------------------
-def sample_image(img):
-    vals = img.sampleRegions(
-        collection=points,
-        scale=10,
-        geometries=False
-    )
-    # Add metadata
-    def add_meta(f):
-        return f.set({
-            "Date": ee.Date(img.get("system:time_start")).format("YYYY-MM-dd"),
-            "Satellite": "Sentinel-2",
-            "CloudyPixelPercent": img.get("CLOUDY_PIXEL_PERCENTAGE"),
-            "longitude": f.get("longitude"),
-            "latitude": f.get("latitude")
-        })
-    return vals.map(add_meta)
-
-# Flatten all image samples into one collection
-sampled = s2.map(sample_image).flatten()
-
-# -------------------------
-# 6. Export to Google Drive as CSV
-# -------------------------
-task = ee.batch.Export.table.toDrive(
-    collection=sampled,
-    description="Sentinel2_Rice_Bands_With_LatLon_Cloudiness_SCL",
-    folder="GEE_Exports",
-    fileNamePrefix="sentinel2_rice_samples",
-    fileFormat="CSV"
+# =====================================================
+# FIXED SAMPLE POINTS (ONCE)
+# =====================================================
+points = ee.FeatureCollection.randomPoints(
+    region=roi.geometry(),
+    points=N_POINTS,
+    seed=SEED
 )
 
-task.start()
-print("🚀 Export started! Check your Google Drive → GEE_Exports folder.")
+print('Sample points generated:', points.size().getInfo())
+
+# =====================================================
+# SCL MASK (EXACTLY AS REQUESTED)
+# =====================================================
+def maskSCL(img):
+    scl = img.select('SCL')
+    mask = (
+        scl.neq(3)    # cloud shadow
+           .And(scl.neq(8))    # medium cloud
+           .And(scl.neq(9))    # high cloud
+           .And(scl.neq(10))   # cirrus
+           .And(scl.neq(11))   # snow/ice
+    )
+    return img.updateMask(mask)
+
+# =====================================================
+# TASK WAIT (30 MIN + WIFI GUARD)
+# =====================================================
+def wait_for_task(task):
+    start = time.time()
+
+    while True:
+        try:
+            status = task.status()
+            state = status['state']
+        except Exception:
+            print('⚠️ Network issue — retrying in 60s')
+            time.sleep(WIFI_RETRY_WAIT)
+            continue
+
+        if state == 'COMPLETED':
+            print('✔ Task completed')
+            return
+
+        if state == 'FAILED':
+            print('❌ Task failed')
+            return
+
+        elapsed = (time.time() - start) / 60
+        if elapsed >= MAX_WAIT_MINUTES:
+            print('⚠️ 30-minute timeout — moving on')
+            return
+
+        print(f'⏳ {state} — waiting {POLL_INTERVAL}s')
+        time.sleep(POLL_INTERVAL)
+
+# =====================================================
+# EXPORT FUNCTION
+# =====================================================
+def export_image(img, year, month):
+
+    img = ee.Image(img)
+
+    date = ee.Date(img.get('system:time_start'))
+    date_str = date.format('YYYY-MM-dd').getInfo()
+    image_id = img.get('system:index').getInfo()
+    cloud_pct = img.get('CLOUDY_PIXEL_PERCENTAGE')
+
+    coords = ee.Image.pixelLonLat().rename(['longitude', 'latitude'])
+
+    final_image = (
+        img.select([
+            'B1','B11','B12','B2','B3','B4',
+            'B5','B6','B7','B8','B8A','B9','SCL'
+        ])
+        .addBands(coords)
+        .set({
+            'Date': date_str,
+            'CloudyPixelPercent': cloud_pct,
+            'Satellite': 'Sentinel-2',
+            'District': DISTRICT_NAME
+        })
+    )
+
+    table = (
+        final_image.sampleRegions(
+            collection=points,
+            scale=10,
+            geometries=True
+        )
+        .map(lambda f: f.set({
+            'Date': date_str,
+            'CloudyPixelPercent': cloud_pct,
+            'Satellite': 'Sentinel-2',
+            'District': DISTRICT_NAME
+        }))
+    )
+
+    description = f'{DISTRICT_NAME}_{year}_{month:02d}_{date_str}_PTS_S2'
+
+    task = ee.batch.Export.table.toDrive(
+        collection=table,
+        description=description,
+        folder=str(year),
+        fileFormat='CSV'
+    )
+
+    task.start()
+    print(f'🚀 Started export: {description}')
+    return task
+
+# =====================================================
+# MAIN LOOP — YEAR → MONTH → 4 IMAGES
+# =====================================================
+for year in YEARS:
+    print(f'\n==============================')
+    print(f'📅 PROCESSING YEAR {year}')
+    print(f'==============================')
+
+    for month in range(1, 13):
+        start_date = f'{year}-{month:02d}-01'
+        end_date   = f'{year}-{month:02d}-28'
+
+        print(f'\n📆 {year}-{month:02d}')
+
+        images = (
+            ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+            .filterBounds(roi)
+            .filterDate(start_date, end_date)
+            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 50))
+            .map(maskSCL)
+            .sort('CLOUDY_PIXEL_PERCENTAGE')
+            .limit(IMAGES_PER_MONTH)   # 👈 critical
+        )
+
+        img_list = images.toList(IMAGES_PER_MONTH)
+
+        img_count = images.size().getInfo()   # small (≤4), safe
+        print(f'  Found {img_count} valid images')
+
+        for i in range(img_count):
+            img = img_list.get(i)
+            print(f'  → Image {i+1}/{img_count}')
+            task = export_image(img, year, month)
+            wait_for_task(task)
+
+
+print('\n✅ ALL YEARS COMPLETED SAFELY')
